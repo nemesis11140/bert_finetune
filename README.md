@@ -2,6 +2,34 @@
 
 BERT 中文情感二分类微调（轻量级工程化项目）。数据由模板合成，模型用本地 `bert-base-chinese` 微调。
 
+## 模型准备（必读）
+
+本仓库**不包含任何模型权重**——预训练权重和训练产出都已在 `.gitignore` 中排除（体积太大）。运行前需要自己准备两个模型目录：
+
+### 1. 预训练模型 `bert-base-chinese/`（需手动下载）
+
+- 训练、评估、Web 页面首次运行时都从 `config.yaml → model.base_model` 指定的本地路径加载预训练权重。**缺少这个目录，脚本会直接报错，跑不起来。**
+- 下载后放到**项目根目录** `bert-base-chinese/`（约 400MB），至少需要这几个文件：
+
+  | 文件 | 作用 |
+  |---|---|
+  | `config.json` | 模型结构配置 |
+  | `pytorch_model.bin` 或 `model.safetensors` | 预训练权重（任选其一） |
+  | `vocab.txt` | 词表 |
+  | `tokenizer_config.json` / `tokenizer.json` | 分词器配置 |
+
+- 下载地址：[HuggingFace: bert-base-chinese](https://huggingface.co/google-bert/bert-base-chinese)，或用命令行：
+
+  ```bash
+  uv run huggingface-cli download google-bert/bert-base-chinese --local-dir bert-base-chinese
+  ```
+
+### 2. 训练产出模型 `models/`（训练后自动生成）
+
+- `scripts/train.py` 每次训练结束会把**最优模型**保存到 `models/<时间戳>/`（权重 + 分词器 + 当时用的 `config.yaml`），同样不进 git。
+- 评估和 Web 页面默认从 `models/` 读取：`scripts/evaluate.py --model-dir models/<时间戳>`，Streamlit 侧边栏可选择 `models/` 下的任一模型。
+- 仓库已带一个从旧版迁移过来的模型 `models/20260827-legacy`，想直接体验推理可跳过训练，用它即可。
+
 ## 项目架构
 
 ```
