@@ -1,0 +1,31 @@
+# ==================== 项目统一配置 ====================
+# 所有可调参数集中在这里，改参数不用动代码。
+# 训练时会把本文件内容原样记入 run 的 manifest.json，保证可复现。
+
+# 数据
+data:
+  processed_path: data/processed/sentiment_train_data.json  # 生成的训练数据存放位置
+  test_sentences_path: data/test_sentences.json             # 评估用的测试集（带 gold 标签）
+  num_per_class: 200                                        # 生成数据时每个类别的样本数
+  val_ratio: 0.2                                            # 训练/验证切分比例
+  seed: 42                                                  # 数据生成与切分的随机种子
+
+# 模型
+model:
+  base_model: bert-base-chinese      # 预训练权重（本地路径）
+  num_labels: 2                      # 分类数
+  max_len: 128                       # 最长输入 token 数
+
+# 训练
+train:
+  batch_size: 8
+  epochs: 5
+  learning_rate: 0.00002   # 注意：YAML 里不要写 2e-5（会被解析成字符串），用 0.00002 或 2.0e-5
+  weight_decay: 0.01
+  logging_steps: 10                  # 每多少步打一次 loss
+  seed: 42                           # 训练随机种子
+
+# 输出
+run:
+  runs_dir: runs                     # 每次训练的完整存档目录（manifest/指标/控制台日志/曲线）
+  models_dir: models                 # 正式产出的最优模型目录（按 run 名分文件夹）

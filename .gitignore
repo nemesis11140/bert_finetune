@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# 训练产物（可由 scripts/generate_data.py 再生成）
+data/processed/
+
+# 每次训练的完整存档 + 正式产出的模型（体积大、可复现）
+runs/
+models/
+
+# 预训练权重与旧版模型目录（体积大，不入库）
+bert-base-chinese/
+sentiment_model_final/

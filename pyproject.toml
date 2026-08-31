@@ -1,0 +1,36 @@
+[project]
+name = "bert-finetune"
+version = "0.1.0"
+description = "BERT 中文情感分类微调（轻量级工程化项目）"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.5,<2.9",
+    "torchvision>=0.23,<0.24",  # 与 torch 2.8.0+cpu 配套；transformers 的 zoedepth 模块无守卫导入它，缺了会报 ModuleNotFoundError
+    "transformers>=5.16.1",
+    "scikit-learn>=1.6",
+    "accelerate>=1.14.0",
+    "matplotlib>=3.11.1",
+    "pyyaml>=6.0",
+    "streamlit>=1.62.0",
+]
+
+# 声明包为 src/sentiment，这样 uv sync 后 import sentiment 全局可用
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["sentiment"]
+
+# torch 必须走 PyTorch 官方 CPU 源（这台机器没有 NVIDIA GPU，
+# PyPI 上的默认 torch 是 CUDA 版，c10.dll 在无 CUDA 环境会报 WinError 1114）
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
