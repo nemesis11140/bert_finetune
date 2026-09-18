@@ -1,0 +1,19 @@
+# 构建上下文里不需要的东西。注意 models/ 也被排除——权重靠运行时挂载，
+# 否则镜像会白白胖 400MB 且每次重训都得重新构建。
+.git
+.gitignore
+.venv
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 训练产物与权重
+runs/
+models/
+bert-base-chinese/
+data/processed/
+
+# 本地环境
+.pytest_cache/
+.idea/
+.vscode/

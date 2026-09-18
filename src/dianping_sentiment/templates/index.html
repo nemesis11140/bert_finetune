@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{{ app_title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark">点评</span>
+        <div class="brand-text">
+          <h1>{{ app_title }}</h1>
+          <p>自动判别中文评价是正面还是负面，支持单条与批量分析</p>
+        </div>
+      </div>
+      <div class="model-badge" id="model-badge" title="当前服务固定使用的模型，由部署方配置">
+        <span class="dot"></span><span id="model-badge-text">连接中…</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="card">
+      <div class="tabs" role="tablist">
+        <button class="tab is-active" data-tab="single" role="tab">单条分析</button>
+        <button class="tab" data-tab="batch" role="tab">批量分析</button>
+      </div>
+
+      <!-- 单条 -->
+      <div class="panel is-active" id="panel-single" role="tabpanel">
+        <label class="field-label" for="input-single">评价内容</label>
+        <textarea id="input-single" rows="3"
+                  placeholder="粘贴一条用户评价，例如：这家店环境一般，不过菜是真好吃"></textarea>
+        <div class="actions">
+          <button class="btn-primary" id="btn-single">开始分析</button>
+          <span class="hint" id="hint-single"></span>
+        </div>
+        <div class="samples">
+          <span class="samples-label">试试示例</span>
+          {% for s in samples %}
+          <button class="chip" data-sample="{{ s }}">{{ s }}</button>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- 批量 -->
+      <div class="panel" id="panel-batch" role="tabpanel">
+        <label class="field-label" for="input-batch">批量评价<span class="field-hint">每行一条，最多 64 条</span></label>
+        <textarea id="input-batch" rows="8"
+                  placeholder="每行粘贴一条评价：&#10;份量足价格实惠，老板还送了小菜&#10;等了一个小时才上菜，不会再来了"></textarea>
+        <div class="actions">
+          <button class="btn-primary" id="btn-batch">批量分析</button>
+          <button class="btn-ghost" id="btn-clear">清空</button>
+          <span class="hint" id="hint-batch">已输入 0 条</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="result" class="result" hidden></section>
+  </main>
+
+  <footer class="footer">
+    <span>模型：本地 bert-base-chinese 微调 · 推理全程在本机完成，评价内容不外传</span>
+  </footer>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

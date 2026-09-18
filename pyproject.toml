@@ -1,7 +1,7 @@
 [project]
-name = "bert-finetune"
-version = "0.1.0"
-description = "BERT 中文情感分类微调（轻量级工程化项目）"
+name = "dianping-sentiment"
+version = "0.2.0"
+description = "大众点评客户评价情感分析（中文评价正负面判别：BERT 微调 + REST API + Web 页面）"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -12,17 +12,21 @@ dependencies = [
     "accelerate>=1.14.0",
     "matplotlib>=3.11.1",
     "pyyaml>=6.0",
-    "streamlit>=1.62.0",
+    "flask>=3.1",
+    "waitress>=3.0",  # 生产用 WSGI 服务器（纯 Python，Windows 可用；gunicorn 不支持 Windows）
 ]
 
-# 声明包为 src/sentiment，这样 uv sync 后 import sentiment 全局可用
+# 声明包为 src/dianping_sentiment，这样 uv sync 后 import 全局可用
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["sentiment"]
+packages = ["dianping_sentiment"]
+# 页面模板和静态资源不是 .py，必须显式声明，否则打包后会缺文件
+[tool.setuptools.package-data]
+dianping_sentiment = ["templates/*.html", "static/*.css", "static/*.js"]
 
 # torch 必须走 PyTorch 官方 CPU 源（这台机器没有 NVIDIA GPU，
 # PyPI 上的默认 torch 是 CUDA 版，c10.dll 在无 CUDA 环境会报 WinError 1114）

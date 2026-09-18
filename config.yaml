@@ -1,31 +1,40 @@
-# ==================== 项目统一配置 ====================
-# 所有可调参数集中在这里，改参数不用动代码。
-# 训练时会把本文件内容原样记入 run 的 manifest.json，保证可复现。
+# ==================== 项目配置 ====================
+# 训练和服务共用这一份。训练时会把内容记入 run 的 manifest.json，
+# 并把副本存进模型目录，任何模型都能回溯到它是用什么配置训出来的。
 
-# 数据
 data:
-  processed_path: data/processed/sentiment_train_data.json  # 生成的训练数据存放位置
-  test_sentences_path: data/test_sentences.json             # 评估用的测试集（带 gold 标签）
-  num_per_class: 200                                        # 生成数据时每个类别的样本数
-  val_ratio: 0.2                                            # 训练/验证切分比例
-  seed: 42                                                  # 数据生成与切分的随机种子
+  processed_path: data/processed/train_data.json  # 合成训练数据的落盘位置
+  test_sentences_path: data/test_sentences.json   # 人工标注测试集
+  num_per_class: 200                              # 每个类别的样本数
+  val_ratio: 0.2                                  # 验证集比例
+  seed: 42                                        # 数据生成与切分的随机种子
 
-# 模型
 model:
-  base_model: bert-base-chinese      # 预训练权重（本地路径）
-  num_labels: 2                      # 分类数
-  max_len: 128                       # 最长输入 token 数
+  base_model: bert-base-chinese   # 预训练权重（本地目录，需自行下载）
+  num_labels: 2                   # 情感类别数
+  max_len: 128                    # 截断上限；推理按 batch 内实际长度动态补齐，不会补到这里
 
-# 训练
 train:
   batch_size: 8
   epochs: 5
-  learning_rate: 0.00002   # 注意：YAML 里不要写 2e-5（会被解析成字符串），用 0.00002 或 2.0e-5
+  learning_rate: 0.00002   # 注意：YAML 里不要写 2e-5（会被解析成字符串）
   weight_decay: 0.01
-  logging_steps: 10                  # 每多少步打一次 loss
-  seed: 42                           # 训练随机种子
+  logging_steps: 10
+  seed: 42
 
-# 输出
 run:
-  runs_dir: runs                     # 每次训练的完整存档目录（manifest/指标/控制台日志/曲线）
-  models_dir: models                 # 正式产出的最优模型目录（按 run 名分文件夹）
+  runs_dir: runs      # 每次训练的完整存档（manifest/指标/日志/曲线）
+  models_dir: models  # 正式产出的模型，按 run 名分目录
+
+# 服务参数，可以用环境变量覆盖（容器部署不用重建镜像）：
+#   DS_HOST / DS_PORT / DS_DEBUG / DS_MODEL_DIR / DS_NUM_THREADS / DS_LOG_LEVEL
+serving:
+  host: 127.0.0.1      # 容器里用 DS_HOST=0.0.0.0 覆盖
+  port: 8000
+  debug: false         # 开了就用 Flask 自带服务器 + 自动重载，只适合本地开发
+  threads: 8           # WSGI 工作线程数；推理是 CPU 密集的，并发上去其实是排队
+  model_dir: ""        # 留空 = 自动取 models/ 下最新的；上线时写死具体时间戳目录
+  num_threads: 0       # torch 线程数，0 = 自动（取 min(8, 逻辑核数)）
+  warmup: true         # 启动时先跑一次空推理，避免第一个请求慢好几倍
+  max_batch_size: 64   # 单次批量分析的最大条数
+  log_level: INFO
