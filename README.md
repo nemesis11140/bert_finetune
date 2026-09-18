@@ -112,7 +112,17 @@ uv run python scripts/cli.py serve               # 启动服务 → http://127.0
 
 `--help` 看全部用法，`--config` 可指定非默认配置文件。
 
-### 3. 配置
+### 3. 页面效果
+
+单条分析（示例特意用了一句反讽，模型判为负面）：
+
+![单条分析](docs/screenshot-single.png)
+
+批量分析（每行一条，输出正负占比汇总 + 逐条结果）：
+
+![批量分析](docs/screenshot-batch.png)
+
+### 4. 配置
 
 一份 `config.yaml`，五段：
 
@@ -136,7 +146,7 @@ uv run python scripts/cli.py serve
 `serving.model_dir` 留空时自动取 `models/` 下最新的一个（本地开发省事）；
 **上线时应写死某个时间戳目录**，避免多训了一版模型被悄悄切走。
 
-### 4. Docker
+### 5. Docker
 
 ```bash
 docker build -t dianping-sentiment .
@@ -146,7 +156,7 @@ docker run --rm -p 8000:8000 -v "$PWD/models:/app/models:ro" dianping-sentiment
 模型不进镜像（400MB 且随训练变化），运行时挂载。要固定版本就加
 `-e DS_MODEL_DIR=/app/models/<时间戳>`。容器内用 waitress 跑 WSGI，配了 `/api/health` 健康检查。
 
-### 5. 接口
+### 6. 接口
 
 页面提供单条分析和批量分析（一行一条）。接口同样对外可用：
 
