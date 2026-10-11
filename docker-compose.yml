@@ -1,0 +1,48 @@
+# 大众点评情感分析 —— 单机编排
+#
+# 起服务：
+#   docker compose up -d --build
+#   docker compose logs -f api
+#   docker compose down
+#
+# 固定模型版本（不写就自动取挂载进来的 models/ 下最新一版）：
+#   DS_MODEL_DIR=/app/models/20260917-192434 docker compose up -d
+#
+# 训练 / 评估（profile 里的服务，不会跟着 up 一起起）：
+#   docker compose run --rm train               # 训练
+#   docker compose run --rm train generate      # 生成数据
+#   docker compose run --rm train evaluate      # 评估
+#   产物直接落在宿主机的 models/ 和 runs/，服务挂载着就能用，不用重建镜像。
+
+services:
+  api:
+    build: .
+    image: dianping-sentiment:latest
+    container_name: dianping-api
+    ports:
+      - "${DS_PORT:-8000}:8000"
+    environment:
+      DS_HOST: 0.0.0.0
+      DS_LOG_LEVEL: ${DS_LOG_LEVEL:-INFO}
+      # 空值 = 自动取 models/ 下最新的一版（config.yaml 里的默认行为）
+      DS_MODEL_DIR: ${DS_MODEL_DIR:-}
+    volumes:
+      # 权重不进镜像（400MB 且随训练变化），运行时挂进来；只读，容器里改不动
+      - ./models:/app/models:ro
+      # 配置挂进来，调线程数/批量上限不用重建镜像
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+    # 健康检查沿用 Dockerfile 里的 HEALTHCHECK（打 /api/health，不触发推理）
+
+  train:
+    profiles: ["train"]
+    build: .
+    image: dianping-sentiment:latest
+    # 不带参数就是训练；带参数则覆盖，如 `run --rm train evaluate`
+    command: ["python", "scripts/cli.py", "train"]
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./bert-base-chinese:/app/bert-base-chinese:ro  # 预训练权重，只读
+      - ./data:/app/data                              # 读写：生成的数据要落盘
+      - ./runs:/app/runs                              # 训练存档
+      - ./models:/app/models                          # 产出模型，服务直接读得到
