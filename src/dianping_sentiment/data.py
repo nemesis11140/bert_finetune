@@ -11,6 +11,8 @@ from pathlib import Path
 
 import torch
 
+from . import ID2LABEL
+
 # ==================== 模板库 ====================
 # 正面句子模板
 positive_templates = [
@@ -287,6 +289,8 @@ def _generate_text(templates, word_pool, label, num_samples, seen):
 
 def generate(processed_path: str | Path, num_per_class: int, seed: int) -> dict:
     """生成正/负样本并写入 processed_path，返回统计信息。"""
+    if type(num_per_class) is not int or num_per_class <= 0:
+        raise ValueError("num_per_class 必须是正整数")
     random.seed(seed)
 
     seen: set[str] = set()
@@ -321,17 +325,32 @@ def generate(processed_path: str | Path, num_per_class: int, seed: int) -> dict:
 
 # ==================== Dataset ====================
 
+def validate_items(items: object, require_labels: bool = True) -> list[dict]:
+    """训练/评估数据的共同约束；评估允许省略 gold 标签。"""
+    if not isinstance(items, list) or not items:
+        raise ValueError("数据必须是非空 JSON 数组")
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"].strip():
+            raise ValueError(f"第 {index + 1} 条数据的 text 必须是非空字符串")
+        label = item.get("label")
+        if label is None and not require_labels:
+            continue
+        if type(label) is not int or label not in ID2LABEL:
+            raise ValueError(f"第 {index + 1} 条数据的 label 只能是整数 0（负面）或 1（正面）")
+    return items
+
+
 def load_data(path: str | Path) -> tuple[list[str], list[int]]:
     """读取 [{text, label}, ...] 格式的 JSON，返回 (texts, labels)。"""
     with open(path, encoding="utf-8") as f:
-        items = json.load(f)
+        items = validate_items(json.load(f))
     return [item["text"] for item in items], [item["label"] for item in items]
 
 
 class SentimentDataset(torch.utils.data.Dataset):
     """把文本 + 标签包装成 Trainer 能用的数据集，__getitem__ 时做 tokenize。
 
-    训练走的是 padding="max_length"（Trainer 要求定长），推理不走这里——
+    单条 tokenize 后，由 DataCollatorWithPadding 在训练 batch 内动态补齐。
     推理在 model.py 里做动态 padding。
     """
 

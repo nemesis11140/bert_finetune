@@ -21,6 +21,7 @@ import contextlib
 import datetime
 import importlib.metadata
 import json
+import math
 import os
 import re
 import shutil
@@ -34,6 +35,7 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
 from transformers import DataCollatorWithPadding, Trainer, TrainingArguments
 
+from . import POSITIVE_ID
 from .config import DEFAULT_CONFIG, Config, load_config
 from .data import SentimentDataset, load_data
 from .model import get_device, load_for_training, load_tokenizer, run_inference
@@ -46,7 +48,8 @@ def compute_metrics(eval_pred):
     predictions = np.argmax(predictions, axis=1)
     return {
         "accuracy": accuracy_score(labels, predictions),
-        "f1": f1_score(labels, predictions, average="binary"),
+        "f1": f1_score(labels, predictions, average="binary",
+                       pos_label=POSITIVE_ID, zero_division=0),
     }
 
 
@@ -69,7 +72,7 @@ def _train(cfg: Config, run_dir: Path, device):
     val_ds = SentimentDataset(val_texts, val_labels, tokenizer, cfg.model.max_len)
 
     # 3. 训练
-    steps_per_epoch = max(1, len(train_ds) // cfg.train.batch_size)
+    steps_per_epoch = math.ceil(len(train_ds) / cfg.train.batch_size)
     training_args = TrainingArguments(
         output_dir=str(run_dir),
         eval_strategy="epoch",     # 每轮评一次验证集，指标进 metrics.json 和曲线图
@@ -81,6 +84,8 @@ def _train(cfg: Config, run_dir: Path, device):
         weight_decay=cfg.train.weight_decay,
         logging_steps=max(1, cfg.train.logging_steps),
         report_to="none",
+        seed=cfg.train.seed,
+        data_seed=cfg.train.seed,
         fp16=torch.cuda.is_available(),
     )
     trainer = Trainer(
@@ -145,7 +150,8 @@ def create_run_dir(runs_dir: str | Path) -> tuple[Path, str]:
     """创建 runs/<时间戳>/ 目录，返回 (run_dir, run_name)。"""
     run_name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = Path(runs_dir) / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # 同秒触发第二次训练时直接失败，避免覆盖已有日志/模型。
+    run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir, run_name
 
 

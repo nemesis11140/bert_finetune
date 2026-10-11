@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import logging
+import math
 import os
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -60,6 +62,8 @@ class ServingConfig:
     num_threads: int = 0    # torch 线程数，0 = 自动
     warmup: bool = True
     max_batch_size: int = 64
+    max_text_length: int = 4096
+    max_content_length: int = 1048576  # JSON 请求体上限（字节）
     log_level: str = "INFO"
 
 
@@ -76,7 +80,7 @@ def _check_types(section: str, obj: object, expected: dict[str, type]) -> None:
     """校验字段类型，防止 YAML 把数值解析成字符串（如把 2e-5 当成字符串）。"""
     for field, typ in expected.items():
         value = getattr(obj, field)
-        if not isinstance(value, typ):
+        if type(value) is not typ:
             raise ValueError(
                 f"config.yaml 的 [{section}.{field}] 类型不对：期望 {typ.__name__}，"
                 f"实际是 {type(value).__name__}（值: {value!r}）。"
@@ -85,7 +89,10 @@ def _check_types(section: str, obj: object, expected: dict[str, type]) -> None:
 
 
 def _bool_env(value: str) -> bool:
-    return value.strip().lower() in ("1", "true", "yes", "on")
+    normalized = value.strip().lower()
+    if normalized not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
+        raise ValueError(f"布尔环境变量值不合法: {value!r}")
+    return normalized in ("1", "true", "yes", "on")
 
 
 def _apply_env(cfg: ServingConfig) -> ServingConfig:
@@ -100,6 +107,9 @@ def _apply_env(cfg: ServingConfig) -> ServingConfig:
         ("DS_LOG_LEVEL", "log_level", lambda v: v.upper()),
     ):
         if key in env:
+            # Compose 未指定模型时会传空字符串，应保留 YAML 中的显式模型。
+            if key == "DS_MODEL_DIR" and not env[key].strip():
+                continue
             cfg = replace(cfg, **{attr: cast(env[key])})
     return cfg
 
@@ -134,6 +144,32 @@ def load_config(path: str | Path | None = None) -> Config:
     if model.num_labels != len(ID2LABEL):
         raise ValueError(f"[model.num_labels] 只支持 {len(ID2LABEL)}，当前 {model.num_labels}")
 
+    _check_types("serving", serving, {
+        "host": str, "port": int, "debug": bool, "threads": int,
+        "model_dir": str, "num_threads": int, "warmup": bool,
+        "max_batch_size": int, "max_text_length": int,
+        "max_content_length": int, "log_level": str,
+    })
+    for section, obj, names in (
+        ("data", data, ("num_per_class",)),
+        ("train", train, ("batch_size", "epochs", "logging_steps", "learning_rate")),
+        ("serving", serving, ("threads", "max_batch_size", "max_text_length", "max_content_length")),
+    ):
+        for name in names:
+            value = getattr(obj, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"[{section}.{name}] 必须大于 0 且是有限数值")
+    if not 0 < data.val_ratio < 1:
+        raise ValueError("[data.val_ratio] 必须在 0 和 1 之间")
+    if not 2 <= model.max_len <= 512:
+        raise ValueError("[model.max_len] 必须在 2 到 512 之间（BERT token 数）")
+    if not math.isfinite(train.weight_decay) or train.weight_decay < 0:
+        raise ValueError("[train.weight_decay] 必须是非负有限数值")
+    if not 1 <= serving.port <= 65535 or serving.num_threads < 0:
+        raise ValueError("serving.port 必须在 1 到 65535 之间，num_threads 必须非负")
+    if serving.log_level.upper() not in logging.getLevelNamesMapping():
+        raise ValueError(f"[serving.log_level] 不合法: {serving.log_level}")
+
     return Config(data=data, model=model, train=train, run=run, serving=serving)
 
 
@@ -143,7 +179,8 @@ def latest_model_dir(models_dir: str | Path) -> Path:
     只认含 config.json 的目录，models/ 下散落的日志/临时文件不会被误选。
     """
     models_root = Path(models_dir)
-    candidates = sorted(p for p in models_root.glob("*") if (p / "config.json").exists())
+    candidates = sorted(p for p in models_root.glob("*")
+                        if p.is_dir() and (p / "config.json").is_file())
     if not candidates:
         raise FileNotFoundError(
             f"{models_root} 下没有可用模型（需要含 config.json 的目录）。"

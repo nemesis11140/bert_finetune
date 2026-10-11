@@ -1,0 +1,23 @@
+# 云端只运行推理：使用已发布的镜像，无需源码/Dockerfile/uv。
+# docker compose -f docker-compose.deploy.yml up -d --no-build api
+services:
+  api:
+    image: ${DS_IMAGE:-dianping-sentiment:latest}
+    ports:
+      - "${DS_BIND_ADDRESS:-127.0.0.1}:${DS_PORT:-8000}:8000"
+    environment:
+      DS_HOST: 0.0.0.0
+      DS_PORT: "8000"
+      DS_DEBUG: "false"
+      DS_MODEL_DIR: ${DS_MODEL_DIR:-}
+      DS_NUM_THREADS: ${DS_NUM_THREADS:-0}
+      DS_LOG_LEVEL: ${DS_LOG_LEVEL:-INFO}
+    volumes:
+      - ./models:/app/models:ro
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

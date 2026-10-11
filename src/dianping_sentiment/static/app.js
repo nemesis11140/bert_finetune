@@ -5,7 +5,8 @@ const $ = (sel) => document.querySelector(sel);
 
 const POS_LABEL = "正面";
 const NEG_LABEL = "负面";
-const MAX_BATCH = 64;
+const MAX_BATCH = Number(document.body.dataset.maxBatch);
+const MAX_TEXT_LENGTH = Number(document.body.dataset.maxTextLength);
 
 /* ---------- 工具 ---------- */
 
@@ -148,6 +149,7 @@ function bindSingle() {
   $("#btn-single").addEventListener("click", () => {
     const text = input.value.trim();
     if (!text) return setHint(hint, "请先输入要分析的评论文本", true);
+    if (text.length > MAX_TEXT_LENGTH) return setHint(hint, `单条文本最多 ${MAX_TEXT_LENGTH} 字符`, true);
     setHint(hint, "");
     withLoading($("#btn-single"), "分析中…", async () => {
       try {
@@ -186,6 +188,7 @@ function bindBatch() {
     const lines = input.value.split("\n").map((s) => s.trim()).filter(Boolean);
     if (!lines.length) return setHint(hint, "请先粘贴要分析的评论，每行一条", true);
     if (lines.length > MAX_BATCH) return setHint(hint, `一次最多 ${MAX_BATCH} 条`, true);
+    if (lines.some((text) => text.length > MAX_TEXT_LENGTH)) return setHint(hint, `单条文本最多 ${MAX_TEXT_LENGTH} 字符`, true);
     setHint(hint, `已输入 ${lines.length} 条`);
     withLoading($("#btn-batch"), "分析中…", async () => {
       try {

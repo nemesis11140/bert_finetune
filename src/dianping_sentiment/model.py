@@ -7,7 +7,7 @@
 1. **动态 padding**：不再把每条都补齐到 ``max_len``（128）。一句 20 字的评价实际只有
    20 来个 token，原来白算 6 倍算力。改成按 batch 内最长补齐，这是提速的主因。
 2. **``torch.inference_mode()``** 替代 ``no_grad()``，少一层 autograd 记账。
-3. **批量内按长度排序**：长短句混在一起时减少 padding 浪费，返回前还原顺序。
+3. **批量返回顺序**：内部按长度排序后，还原调用方的输入顺序。
 4. **启动预热**：把首次前向的冷启动开销挪到服务启动阶段。
 """
 from __future__ import annotations
@@ -18,9 +18,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
-from transformers import BertForSequenceClassification, BertTokenizer
+from transformers import BertConfig, BertForSequenceClassification, BertTokenizer
 
-from . import ID2LABEL
+from . import ID2LABEL, LABEL2ID
 
 # 实测（12 逻辑核，单条 22 token）：1 线程 72ms / 2 线程 47ms / 4 线程 43ms / 8 线程 36ms。
 # 8 线程往后收益很小（内存带宽瓶颈），所以自动档取 min(8, 核数)，
@@ -57,7 +57,21 @@ def _require_local_dir(path: str | Path, what: str) -> str:
 
 
 def load_tokenizer(path: str | Path) -> BertTokenizer:
-    return BertTokenizer.from_pretrained(_require_local_dir(path, "分词器目录"))
+    return BertTokenizer.from_pretrained(_require_local_dir(path, "分词器目录"),
+                                         local_files_only=True)
+
+
+def validate_classifier_config(config: BertConfig, max_len: int) -> None:
+    """拒绝标签数量/语义不匹配的权重，避免上线后将标签错误解释。"""
+    if config.num_labels != len(ID2LABEL):
+        raise ValueError(f"模型必须是二分类，当前 num_labels={config.num_labels}")
+    if config.id2label != ID2LABEL or config.label2id != LABEL2ID:
+        raise ValueError("模型标签映射必须是 0=负面、1=正面，且 label2id 与之对应；"
+                         "请使用本项目训练产物，不要直接修改标签来适配其他权重")
+    if config.problem_type not in (None, "single_label_classification"):
+        raise ValueError("模型必须使用 single_label_classification（单标签二分类）")
+    if not 2 <= max_len <= config.max_position_embeddings:
+        raise ValueError(f"max_len 必须在 2 到 {config.max_position_embeddings} 之间")
 
 
 def load_for_training(base_model: str, num_labels: int, device: torch.device):
@@ -67,7 +81,9 @@ def load_for_training(base_model: str, num_labels: int, device: torch.device):
     """
     return BertForSequenceClassification.from_pretrained(
         _require_local_dir(base_model, "预训练权重目录"),
-        num_labels=num_labels, id2label=ID2LABEL, label2id={v: k for k, v in ID2LABEL.items()}
+        local_files_only=True, num_labels=num_labels,
+        id2label=ID2LABEL, label2id=LABEL2ID,
+        problem_type="single_label_classification",
     ).to(device)
 
 
@@ -120,7 +136,7 @@ def run_inference(model, tokenizer, texts: list[str], device: torch.device,
 
     t0 = time.perf_counter()
 
-    # 长度排序 → 短句聚在一起，减少长句把整批 padding 撑大的浪费
+    # 保留长度排序和结果还原。当前只计算一个 batch，排序本身不会减少 padding。
     order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
     encoded = tokenizer(
         [texts[i] for i in order],
@@ -163,13 +179,17 @@ class SentimentPredictor:
         if not (self.model_dir / "config.json").exists():
             raise FileNotFoundError(f"{self.model_dir} 下没有 config.json，不是有效的模型目录")
 
+        model_config = BertConfig.from_pretrained(str(self.model_dir), local_files_only=True)
+        validate_classifier_config(model_config, max_len)
+
         torch.set_num_threads(resolve_num_threads(num_threads))
         self.num_threads = torch.get_num_threads()
         self.device = device or get_device()
         self.max_len = max_len
 
         self.tokenizer = load_tokenizer(self.model_dir)
-        self.model = BertForSequenceClassification.from_pretrained(str(self.model_dir))
+        self.model = BertForSequenceClassification.from_pretrained(
+            str(self.model_dir), config=model_config, local_files_only=True)
         self.model.to(self.device)
         self.model.eval()
 

@@ -1,199 +1,291 @@
-# 大众点评客户评价情感分析
+# 中文评价情感二分类 Demo
 
-中文用户评价的正负面自动判别：在 `bert-base-chinese` 上微调，对外提供 REST API 和 Web 页面。
-模型和推理都在本机 CPU 上，评价内容不出机器。
+基于 `bert-base-chinese` 微调的中文情感分类项目，提供数据生成、训练、评估、REST API 和 Web 页面，演示从模型开发到 Docker 部署的完整流程。应用场景以餐饮点评为例，当前语料也包含商品、电影等通用评价。
 
-## 背景
+项目使用模板合成数据，未使用真实大众点评业务数据，也不代表与大众点评平台有任何关联。适合学习、演示和内部试用；真实业务接入前需要补充领域数据、重新评估效果及部署容量。
 
-点评、电商平台的用户评价量大，逐条人工看成本高。这个项目做一个能直接跑起来的本地情感判别：
+## 任务定义与能力边界
 
-- **数据自己造** —— 训练语料由模板合成（正负各 200 条），不依赖外部数据集，克隆下来就能跑通全流程。
-- **模型自己训** —— 在本地 `bert-base-chinese` 上微调，一次约 2 分半（CPU）。
-- **推理不出网** —— 服务加载本地模型，请求内容不外传。
+本项目是**单标签二分类**，每条文本只输出一个标签：
 
-效果（`data/test_sentences.json`，22 条人工标注，含否定、口语、反讽、转折句式）：
-
-| 指标 | 值 |
-|---|---|
-| 准确率 | 21/22（95.5%） |
-| F1 | 0.95 |
-| 单条推理延迟 | 32–43 ms（CPU） |
-| 批量单条均摊 | 18–26 ms |
-
-> 验证集准确率是 100%，但**这个数字没有意义**——训练集和验证集同分布。
-> 上面 22 条是人工写的、故意混了容易踩坑的句式，才是有参考价值的那个数。
-
-## 架构
-
-### 目录结构
-
-标注：`[代码]` 入库源码 · `[配置]` 入库配置 · `[产物]` 运行时生成、已 gitignore · `[需自备]` 需自行下载
-
-```
-bert-finetune/
-├── scripts/cli.py              [代码] 唯一命令行入口，四个子命令
-├── config.yaml                 [配置] 唯一配置真源，训练和服务共用这一份
-├── src/dianping_sentiment/     [代码] 业务代码，见下表
-├── tests/test_all.py           [代码] 19 个冒烟测试，不依赖 pytest
-│
-├── data/
-│   ├── test_sentences.json            22 条人工标注测试集，评估用
-│   └── processed/                     [产物] 合成训练数据，generate 生成，可删可重建
-├── bert-base-chinese/          [需自备] 预训练权重，约 400MB，见「部署运行」
-├── models/<时间戳>/             [产物] 训练产出的模型，服务默认加载最新一个
-└── runs/<时间戳>/               [产物] 每次训练的存档：配置/指标/日志/曲线，约 100KB
-```
-
-### 模块职责
-
-```
-src/dianping_sentiment/
-├── config.py      读 config.yaml → 带类型校验的 dataclass；serving 段支持 DS_* 环境变量覆盖
-├── data.py        模板合成训练数据（含转折、反讽句式）+ 包成 PyTorch Dataset
-├── model.py       唯一的推理实现：加载权重、批量推理、SentimentPredictor（模型常驻内存）
-├── train.py       训练主流程 + run 存档（manifest / 指标 / 控制台日志 / 曲线）
-├── evaluate.py    测试集评估：准确率 / F1 / 混淆矩阵 / 错例
-├── service.py     Flask 应用工厂 + 路由 + 请求校验 + 请求日志
-├── templates/     页面骨架
-└── static/        原生 JS + CSS，无构建步骤，改完刷新即可
-```
-
-### 一次请求的路径
-
-```
-POST /api/predict
-  └─ _extract_single()            校验参数，不合法直接 400
-  └─ SentimentPredictor.predict() 模型常驻内存，请求路径上没有磁盘 IO
-       └─ run_inference()         按长度排序 → 动态 padding → 前向 → softmax → 还原顺序
-  └─ _single_response()           组织成 {prediction, latency_ms}
-```
-
-模型在服务启动时加载一次并预热，所以第一个请求不会慢几倍。
-
-### 三个关键设计
-
-- **只有一份推理实现**（`model.py`）。离线评估、训练后抽查、线上服务走同一条代码路径，
-  不会出现「评估挺好、上线不对」。
-- **一份配置、一处真源**。训练参数和服务参数在同一个 `config.yaml` 的不同段里，
-  服务段支持环境变量覆盖，容器里换个 `DS_MODEL_DIR` 就能切模型，不用重建镜像。
-- **一次训练 = 一个 run**。`runs/<时间戳>/` 存配置/指标/日志/曲线的完整快照，
-  历史 run 不会被覆盖；模型单独落到 `models/<时间戳>/`。
-
-性能上，推理路径做过动态 padding、`inference_mode`、批量内按长度排序等优化，
-单条从 120 ms 降到 32–43 ms，**不涉及模型结构、量化或精度取舍**。
-`tests/test_all.py` 里有用例逐条比对优化前后的输出，保证提速没改变预测结果。
-
-## 部署运行
-
-### 1. 准备预训练模型（必做）
-
-仓库**不含任何权重**（体积大，已在 `.gitignore` 排除），需要自己准备：
-
-```bash
-# 只取 PyTorch 用得到的 5 个文件（411.9M）。整个仓库含 4 种框架格式共 1.6G，
-# 不指定文件名就会全下——tf/flax/bin 那三份是同一份权重的不同容器，白占 1.3G。
-uv run hf download google-bert/bert-base-chinese --local-dir bert-base-chinese \
-  config.json model.safetensors vocab.txt tokenizer.json tokenizer_config.json
-```
-
-放到项目根目录 `bert-base-chinese/`。缺这个目录会直接报错，不会静默联网补。
-（国内网络下不动 HF 的话，改用 ModelScope 下同名模型，目录放到同样位置即可。）
-
-### 2. 跑起来
-
-```bash
-uv sync                                          # 装依赖
-
-uv run python scripts/cli.py generate            # 生成训练数据（模板合成，正负各 200 条）
-uv run python scripts/cli.py train               # 训练；在 runs/ 存档、在 models/ 产出模型
-uv run python scripts/cli.py evaluate            # 用测试集评估最新模型
-uv run python scripts/cli.py serve               # 启动服务 → http://127.0.0.1:8000
-```
-
-`--help` 看全部用法，`--config` 可指定非默认配置文件。
-
-### 3. 页面效果
-
-单条分析（示例特意用了一句反讽，模型判为负面）：
-
-![单条分析](docs/screenshot-single.png)
-
-批量分析（每行一条，输出正负占比汇总 + 逐条结果）：
-
-![批量分析](docs/screenshot-batch.png)
-
-### 4. 配置
-
-一份 `config.yaml`，五段：
-
-| 段 | 内容 | 谁用 |
+| 标签 ID | 标签 | 含义 |
 |---|---|---|
-| `data` | 数据路径、每类样本数、验证集比例、随机种子 | 生成数据 / 训练 / 评估 |
-| `model` | 预训练权重路径、类别数、截断长度 | 训练 / 推理 |
-| `train` | batch size、epochs、学习率、日志步长 | 训练 |
-| `run` | `runs/` 和 `models/` 输出目录 | 训练 |
-| `serving` | 端口、线程数、模型目录、批量上限、日志级别 | 服务 |
+| `0` | 负面 | 整体评价偏负面 |
+| `1` | 正面 | 整体评价偏正面 |
 
-服务段每一项都能用**环境变量覆盖**，容器部署不用重建镜像：
+标签映射在 `src/dianping_sentiment/__init__.py` 定义，训练时保存到模型 `config.json`。服务启动时检查模型类别数和标签映射，拒绝三分类、标签反向或映射不明的模型。
+
+- 没有“中性”“混合情感”或“未知”标签。中性、褒贬混合和无关文本仍会被分到正面或负面。
+- `confidence` 是两个类别的 softmax 得分，未经概率校准，不等于模型准确率；高分也可能判断错误。
+- 默认最多处理 128 个 token（包含特殊 token），超出的内容截断。token 数不等于字符数，长评价后半段可能无法参与判断。
+- 反讽、否定、转折示例用于展示能力边界，不能保证所有相似句式都正确。
+- 增加中性标签需要重新定义标注体系、准备三类数据、调整代码并重新训练；只修改 `num_labels` 无法扩展当前模型。
+
+## 实现与目录
+
+服务使用 Flask + Waitress。模型在进程启动时从本地文件加载一次，设置为推理模式并按配置预热。评估和 API 共用 `model.py` 的推理逻辑，使用动态 padding 和 `torch.inference_mode()`；批量结果保持输入顺序。
+
+当前依赖锁定为 CPU 版 PyTorch，默认部署不需要 GPU。训练和推理使用本地权重，模型加载禁用 Hub 下载。浏览器向 API 发送文本，推理在服务部署机器执行；云端部署时，文本会传到云服务器。
+
+```text
+bert_finetune/
+├── pyproject.toml / uv.lock           # 依赖声明与锁文件
+├── config.yaml                       # 训练、评估及服务配置
+├── Dockerfile / .dockerignore         # 镜像构建
+├── docker-compose.yml                # 从源码构建、服务及容器训练
+├── docker-compose.deploy.yml         # 云端仅推理，使用现成镜像
+├── .env.example                      # Compose 环境变量示例
+├── scripts/cli.py                    # generate / train / evaluate / serve
+├── src/dianping_sentiment/
+│   ├── config.py                     # 配置加载、校验和模型目录解析
+│   ├── data.py                       # 模板语料、数据校验和 Dataset
+│   ├── train.py                      # BERT 微调、运行存档和曲线
+│   ├── evaluate.py                   # 指标、混淆矩阵及错例
+│   ├── model.py                      # 模型加载和统一推理
+│   ├── service.py                    # 请求校验、路由和服务日志
+│   ├── templates/                    # Jinja 页面
+│   └── static/                       # JavaScript / CSS
+├── tests/test_all.py                  # 自动化测试，无需 pytest
+├── data/test_sentences.json           # 22 条人工标注示例
+├── docs/                             # 页面截图
+├── bert-base-chinese/                # 自备预训练权重，仅训练需要
+├── data/processed/                   # 生成的训练数据，不入库
+├── models/<运行名>/                   # 训练模型及分词器，不入库
+└── runs/<运行名>/                     # 配置、指标、日志及曲线，不入库
+```
+
+## 本地开发与训练
+
+需要 Python 3.12 和 [uv](https://docs.astral.sh/uv/getting-started/installation/)（本次验证版本为 0.13.0）。`pyproject.toml` 将 Python 范围限制为 `>=3.12,<3.13`。以下命令均在项目根目录执行；仅运行容器时，宿主机不需要 Python 或 uv。
+
+### 1. 安装依赖
 
 ```bash
-DS_HOST=0.0.0.0 DS_PORT=8000 \
-DS_MODEL_DIR=models/20260917-192434 \
-DS_NUM_THREADS=4 DS_LOG_LEVEL=WARNING \
+uv sync --locked
+```
+
+通过锁文件安装一致版本。PyTorch CPU wheel 来自官方源，首次安装需要联网且下载量较大。
+
+### 2. 下载预训练权重（训练时需要）
+
+```bash
+uv run hf download google-bert/bert-base-chinese config.json model.safetensors vocab.txt tokenizer.json tokenizer_config.json --local-dir bert-base-chinese
+```
+
+模型来源：[google-bert/bert-base-chinese](https://huggingface.co/google-bert/bert-base-chinese)。权重与分词文件需完整放在 `bert-base-chinese/`；仓库和镜像均不包含它们。若已有训练模型且仅提供 API，可跳过下载和训练。
+
+### 3. 生成数据、训练和评估
+
+```bash
+uv run python scripts/cli.py generate
+uv run python scripts/cli.py train
+uv run python scripts/cli.py evaluate
+```
+
+默认生成正负各 200 条模板样本，按类别分层切出 20% 验证集，训练 5 轮。训练数据格式如下，标签只允许整数 `0`、`1`：
+
+```json
+[
+  {"text": "菜品好吃，服务也很周到", "label": 1},
+  {"text": "等了很久，上来的菜还是凉的", "label": 0}
+]
+```
+
+训练保存最后一轮权重，不保存 checkpoint，也不自动还原验证集最优轮。输出包括：
+
+- `models/<运行名>/`：`model.safetensors`、`config.json`、分词器文件及 `train.yaml` 配置副本。
+- `runs/<运行名>/`：`manifest.json`、`metrics.json`、`console.log`、`training_curve.png`。
+- 评估将逐条预测保存到所选模型目录的 `eval_results.json`，因此评估时该目录需要可写。
+
+指定模型评估、交互预测或重绘曲线：
+
+```bash
+uv run python scripts/cli.py evaluate --model-dir models/20260917-192434
+uv run python scripts/cli.py evaluate --interactive
+uv run python scripts/cli.py train --replot runs/20260917-192434
+```
+
+`--config` 是全局参数，应放在子命令之前，例如 `uv run python scripts/cli.py --config config.yaml serve`。
+
+### 4. 启动服务
+
+```bash
 uv run python scripts/cli.py serve
 ```
 
-`serving.model_dir` 留空时自动取 `models/` 下最新的一个（本地开发省事）；
-**上线时应写死某个时间戳目录**，避免多训了一版模型被悄悄切走。
+浏览器访问 [http://127.0.0.1:8000](http://127.0.0.1:8000)。没有可用模型时启动失败；项目不会自动替你下载权重或训练。
 
-### 5. Docker
+![单条分析](docs/screenshot-single.png)
 
-```bash
-docker build -t dianping-sentiment .
-docker run --rm -p 8000:8000 -v "$PWD/models:/app/models:ro" dianping-sentiment
-```
+![批量分析](docs/screenshot-batch.png)
 
-模型不进镜像（400MB 且随训练变化），运行时挂载。要固定版本就加
-`-e DS_MODEL_DIR=/app/models/<时间戳>`。容器内用 waitress 跑 WSGI，配了 `/api/health` 健康检查。
+截图为历史版本示例，具体页面文案以当前运行版本为准。
 
-### 6. 接口
+## 配置与模型选择
 
-页面提供单条分析和批量分析（一行一条）。接口同样对外可用：
+`config.yaml` 包含 `data`、`model`、`train`、`run`、`serving` 五个配置段。支持的服务环境变量如下，环境变量优先于 YAML：
 
-| 方法 | 路径 | 说明 |
+| 环境变量 | 对应配置 | 用途 |
 |---|---|---|
-| GET | `/api/health` | 存活探针，不碰模型 |
-| GET | `/api/meta` | 当前生效的模型 / 设备 / 线程数 |
-| POST | `/api/predict` | 单条：`{"text": "..."}` |
-| POST | `/api/predict_batch` | 批量：`{"texts": ["...", ...]}`，也接受换行分隔的字符串 |
+| `DS_HOST` | `serving.host` | 容器内部监听地址 |
+| `DS_PORT` | `serving.port` | 服务端口；Compose 中另用于宿主端口映射 |
+| `DS_DEBUG` | `serving.debug` | 开发模式，部署时保持关闭 |
+| `DS_MODEL_DIR` | `serving.model_dir` | 训练模型目录 |
+| `DS_NUM_THREADS` | `serving.num_threads` | PyTorch CPU 线程数，`0` 表示自动 |
+| `DS_LOG_LEVEL` | `serving.log_level` | 日志级别 |
+
+`threads`、`warmup`、`max_batch_size`、`max_text_length`、`max_content_length` 通过 YAML 配置。默认批量上限 64 条、每条最多 4096 字符、请求体最多 1 MiB。字符限制用于输入校验，模型截断上限仍是 `model.max_len` 个 token。
+
+`DS_MODEL_DIR` 非空时优先使用它；未指定或为空时保留 YAML 的 `serving.model_dir`。两者都未指定时，从 `models/` 下含 `config.json` 的子目录按名称排序选择最后一个。只检查候选目录，不代表完整模型有效；最终加载仍会校验配置和权重。
+
+模型在启动时选定，不会随目录变化热更新。部署建议明确指定已验证版本，便于回滚；只有一个模型目录时也可以使用自动选择。`evaluate --model-dir` 优先于服务配置，未传该参数时与服务使用同一套模型选择规则。
+
+## Docker 部署
+
+### 本机从源码构建
+
+需要 Docker Engine / Docker Desktop 和 Docker Compose v2 或兼容版本；Docker Desktop 使用 Linux 容器。模型通过目录挂载，不进入镜像。
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/predict \
-  -H "Content-Type: application/json" \
-  -d '{"text": "这电影真好看，看得我昏昏欲睡"}'
-# {"text": "...", "latency_ms": 43.5,
-#  "prediction": {"label": "负面", "label_id": 0, "confidence": 0.9994,
-#                 "probs": {"负面": 0.9994, "正面": 0.0006}}}
+docker compose build api
+docker compose up -d --no-build api
+docker compose ps
+docker compose logs --tail 50 api
 ```
 
-参数不合法一律返回 400 + `{"error": "..."}`；批量上限由 `serving.max_batch_size` 控制（默认 64）。
-`latency_ms` 是整批耗时，`per_item_ms` 才是分摊后的单条成本。
+默认端口只绑定宿主机 `127.0.0.1:8000`。模型、配置必须存在于 Compose 文件所在目录：
 
-## 测试
+```text
+部署目录/
+├── docker-compose.yml
+├── config.yaml
+└── models/
+    └── 20260917-192434/   # 上传整个模型目录，包含权重、标签配置及分词器
+```
+
+可复制 `.env.example` 为 `.env` 固定模型和端口。Compose 中容器端口始终为 `8000`，`.env` 的 `DS_PORT` 控制宿主映射端口；例如 `DS_PORT=9000` 时访问宿主机 `9000`。
+
+### 云服务器使用已有镜像
+
+服务器只需 Docker 和 Compose，无需安装 Python、uv，也无需下载预训练权重或重新训练。镜像需与服务器 CPU 架构匹配。
+
+1. 发布构建好的镜像到你的镜像仓库，或通过 `docker save` / `docker load` 传输。
+2. 上传 `docker-compose.deploy.yml`、`config.yaml` 和完整训练模型目录 `models/<运行名>/`。
+3. 在部署目录创建 `.env`，将 `DS_IMAGE` 替换成已发布的实际镜像名和版本：
+
+```dotenv
+DS_IMAGE=你的镜像仓库/你的镜像名:版本
+DS_MODEL_DIR=/app/models/20260917-192434
+DS_PORT=8000
+DS_BIND_ADDRESS=127.0.0.1
+DS_NUM_THREADS=0
+DS_LOG_LEVEL=INFO
+```
+
+服务器执行：
+
+```bash
+docker compose -f docker-compose.deploy.yml pull api
+docker compose -f docker-compose.deploy.yml up -d --no-build api
+docker compose -f docker-compose.deploy.yml ps
+curl http://127.0.0.1:8000/api/health
+curl http://127.0.0.1:8000/api/meta
+```
+
+若通过 `docker load` 导入镜像，保证 `DS_IMAGE` 与导入的名称和标签一致，跳过 `pull`。云端 Compose 没有 `build`，不会要求服务器提供源码或 Dockerfile。
+
+默认只允许服务器本机访问，适合由反向代理提供 HTTPS。若需要外部直连，将 `DS_BIND_ADDRESS` 改为 `0.0.0.0` 并配置云安全组/防火墙。当前没有认证和限流，不宜直接作为不受保护的公开 API。容器的非 root 用户 UID 为 `10001`，挂载的模型和配置需要可读，目录需要可遍历。
+
+### 停止、更新与回滚
+
+以下命令为本地 Compose；云端请在 `docker compose` 后加 `-f docker-compose.deploy.yml`。
+
+```bash
+docker compose stop api                  # 停止但保留容器
+docker compose start api                 # 使用同一容器启动，无需构建
+docker compose down                      # 移除容器与项目网络，挂载文件仍保留
+docker compose up -d --no-build api       # 从已有镜像重新创建并启动
+docker compose restart api               # 修改挂载的 config.yaml 后重启
+docker compose up -d --no-build --force-recreate api  # 修改 .env 后重新创建
+```
+
+修改源码或依赖后需要重新构建并发布镜像；修改模型或挂载配置不需要重建镜像。切换模型时上传新目录、修改 `.env` 的 `DS_MODEL_DIR`、重建容器，再通过 `/api/meta` 确认版本和预测接口做冒烟测试。回滚时指定旧镜像版本和旧模型目录。
+
+健康检查访问 `/api/health`，不执行模型前向。模型加载失败会阻止服务启动；`healthy` 不证明预测效果或高负载下的可用性。`restart: unless-stopped` 用于进程退出后的重启，不会因为 `unhealthy` 状态自动重启。
+
+### 容器内训练（可选）
+
+使用源码仓库的 `docker-compose.yml`，另外准备 `bert-base-chinese/`。训练服务通过 profile 与 API 分离：
+
+```bash
+docker compose build train
+docker compose run --rm train generate
+docker compose run --rm train
+docker compose run --rm train evaluate
+```
+
+产物写回宿主机的 `data/`、`runs/`、`models/`。Linux 上可通过 `.env` 的 `DS_TRAIN_UID`、`DS_TRAIN_GID` 指定宿主用户身份，并提前创建可写目录；未指定时训练容器使用 root，API 始终使用非 root 用户。
+
+## API
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/` | Web 页面 |
+| GET | `/api/health` | 存活状态和运行时长 |
+| GET | `/api/meta` | 模型版本、设备、标签及输入限制 |
+| POST | `/api/predict` | 单条预测，`{"text":"评价"}` |
+| POST | `/api/predict_batch` | 批量预测，`{"texts":["评价1","评价2"]}` |
+
+批量接口也接受 `texts` 为换行分隔字符串。字符串会去掉首尾空白，空行会被过滤；数组中的非字符串元素返回 400。
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/predict -H 'Content-Type: application/json' -d '{"text":"菜很好吃，下次还来"}'
+```
+
+返回结构示例（分数和耗时仅用于说明格式）：
+
+```json
+{
+  "text": "菜很好吃，下次还来",
+  "prediction": {
+    "label": "正面",
+    "label_id": 1,
+    "confidence": 0.98,
+    "probs": {"负面": 0.02, "正面": 0.98}
+  },
+  "latency_ms": 40.0
+}
+```
+
+批量返回包含 `texts`、`items`、`summary`、`latency_ms` 和 `per_item_ms`；`items[].index` 从 `0` 开始，与过滤空白后的 `texts` 对应。`latency_ms` 是分词与模型推理耗时，不含网络传输、排队及完整请求处理；批量的 `per_item_ms` 是总推理耗时除以条数。
+
+输入错误返回 400 和 `{"error":"..."}`，请求体超限返回 413，内部错误返回 500。Flask 的错误响应使用 JSON；被 WSGI 服务器提前拒绝的超大请求可能返回文本响应。
+
+## 评估与验证
+
+已有模型 `20260917-192434` 在仓库 22 条人工标注示例上的历史结果：
+
+| 指标 | 结果 |
+|---|---|
+| Accuracy | 21/22，95.45% |
+| F1（正面为正类） | 94.74% |
+| 混淆矩阵（行真实，列预测，顺序负面/正面） | `[[12, 0], [1, 9]]` |
+
+该模型权重不在 Git 中；重新训练结果可能不同。这 22 条混合领域示例用于回归检查，样本量小，部分褒贬混合句标注有主观性，不能代表真实业务准确率。合成训练/验证集共享模板与词库，高验证分数不能证明跨模板或真实评论泛化。
+
+延迟受 CPU、线程数、文本长度、批量大小和容器资源影响，因此不提供统一延迟或吞吐承诺。默认最多 8 个 PyTorch CPU 线程及 8 个 WSGI 请求线程；并发请求可能争抢 CPU 和内存，部署前应使用真实批量及并发进行容量测试。
+
+运行自动化测试：
 
 ```bash
 uv run python tests/test_all.py
 ```
 
-19 个用例，不依赖 pytest，直接跑。覆盖数据生成、配置加载与环境变量覆盖、
-接口校验与响应结构（用假模型，不加载权重）、以及推理正确性。
-需要真实模型的用例在 `models/` 为空时会自动跳过。
+覆盖数据与配置校验、二分类标签约束、HTTP 输入与响应、训练参数、评估边界和真实推理。真实模型用例在 `models/` 为空时跳过；纯单测通过不等于权重加载已验证。
 
-## 已知边界
+## 后续业务化工作
 
-- **训练数据是合成的**，句式单一，验证集高分不代表真实场景泛化。
-  想要更真实的效果，应接入真实语料（大众点评/美团/微博的真实评论）。
-- **没有 checkpoint**。单次训练只要 2 分半，重跑一遍比留断点便宜；代价是不能断点续训，
-  且保存的是最后一轮而非 val 最优轮（实测这里是同一轮）。
-- **并发**：推理是 CPU 密集型，多线程并发实际是排队。要提高吞吐应该横向扩副本，而不是加线程数。
-- **未覆盖**：没有模型注册表 / 灰度发布 / 监控指标（Prometheus 等）。
+- 使用取得合法使用权限的领域评论，定义中性/混合评价的标注规则，按来源、时间和模板隔离验证/测试集，并检查重复样本。
+- 在独立测试集上报告各类别 precision/recall/F1 和错例；需要拒判或人工复核时，先评估阈值与概率校准。
+- 加入模型版本管理、可复现的发布流程、HTTPS、认证/限流、指标监控、并发容量与内存评估。
+- 长评论需要明确切片和聚合规则；三分类、方面级情感分析等需求需要调整任务与训练数据。

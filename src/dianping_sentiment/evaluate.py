@@ -4,7 +4,7 @@
   并把结果存成 eval_results.json 放到模型目录下。
 - 交互模式（--interactive）：命令行逐条输入，实时预测。
 
-推理统一走 ``serving/predictor.py``——和线上服务是同一套代码，所以这里的指标
+推理统一走 ``model.py``——和线上服务是同一套代码，所以这里的指标
 就是线上行为的忠实反映。
 """
 from __future__ import annotations
@@ -17,17 +17,19 @@ from pathlib import Path
 import numpy as np
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
-from . import ID2LABEL
-from .config import Config, latest_model_dir, load_config
+from . import ID2LABEL, POSITIVE_ID
+from .config import Config, load_config, resolve_model_dir
+from .data import validate_items
 from .model import SentimentPredictor
 
 
 def batch_evaluate(cfg: Config, model_dir: Path) -> None:
-    predictor = SentimentPredictor(model_dir, max_len=cfg.model.max_len)
+    predictor = SentimentPredictor(model_dir, max_len=cfg.model.max_len,
+                                   num_threads=cfg.serving.num_threads)
     print(f"模型: {model_dir} | 设备: {predictor.device}")
 
     with open(cfg.data.test_sentences_path, encoding="utf-8") as f:
-        items = json.load(f)
+        items = validate_items(json.load(f), require_labels=False)
 
     print(f"测试集: {len(items)} 条")
     # 一次性整批推理（和线上批量接口同一条路径），比逐条循环快得多
@@ -40,6 +42,7 @@ def batch_evaluate(cfg: Config, model_dir: Path) -> None:
             "text": it["text"],
             "label": it.get("label"),
             "pred_label": pred.label,
+            "pred_label_id": pred.label_id,
             "confidence": round(pred.confidence, 4),
         })
 
@@ -48,17 +51,17 @@ def batch_evaluate(cfg: Config, model_dir: Path) -> None:
     for r in results:
         mark = ""
         if r["label"] is not None:
-            mark = " ✅" if r["label"] == int(r["pred_label"] == ID2LABEL[1]) else " ❌"
+            mark = " ✅" if r["label"] == r["pred_label_id"] else " ❌"
         print(f"  [{r['label'] if r['label'] is not None else '?'}] → {r['pred_label']} "
               f"({r['confidence']:.1%})  {r['text']}{mark}")
 
     # 有 gold 标签时计算指标
     if all(r["label"] is not None for r in results):
         gold = np.array([r["label"] for r in results])
-        pred = np.array([1 if r["pred_label"] == ID2LABEL[1] else 0 for r in results])
+        pred = np.array([r["pred_label_id"] for r in results])
         acc = accuracy_score(gold, pred)
-        f1 = f1_score(gold, pred, average="binary")
-        cm = confusion_matrix(gold, pred)
+        f1 = f1_score(gold, pred, average="binary", pos_label=POSITIVE_ID, zero_division=0)
+        cm = confusion_matrix(gold, pred, labels=list(ID2LABEL))
         print("\n" + "=" * 40)
         print(f"准确率: {acc:.2%}")
         print(f"F1    : {f1:.2%}")
@@ -66,7 +69,7 @@ def batch_evaluate(cfg: Config, model_dir: Path) -> None:
         print(f"        预测负面  预测正面")
         print(f" 真实负面   {cm[0][0]:>5}     {cm[0][1]:>5}")
         print(f" 真实正面   {cm[1][0]:>5}     {cm[1][1]:>5}")
-        errors = [r for r in results if r["label"] != (1 if r["pred_label"] == ID2LABEL[1] else 0)]
+        errors = [r for r in results if r["label"] != r["pred_label_id"]]
         print(f"\n错例 {len(errors)} 条:")
         for r in errors:
             print(f"  真实={r['label']} 预测={r['pred_label']} ({r['confidence']:.1%})  {r['text']}")
@@ -80,7 +83,8 @@ def batch_evaluate(cfg: Config, model_dir: Path) -> None:
 
 
 def interactive(cfg: Config, model_dir: Path) -> None:
-    predictor = SentimentPredictor(model_dir, max_len=cfg.model.max_len)
+    predictor = SentimentPredictor(model_dir, max_len=cfg.model.max_len,
+                                   num_threads=cfg.serving.num_threads)
     print(f"🎯 模型已加载: {model_dir}（设备: {predictor.device}）")
     print("请输入评价文本，输入 q 或 exit 退出\n")
 
@@ -109,12 +113,12 @@ def main(config_path=None, model_dir: str | None = None, interactive_mode: bool 
 
     if model_dir is None:
         try:
-            found = latest_model_dir(cfg.run.models_dir)
+            found = resolve_model_dir(cfg)
         except FileNotFoundError as exc:
             print(f"❌ {exc}")
             sys.exit(1)
         model_dir = str(found)
-        print(f"未指定 --model-dir，使用最新模型: {model_dir}")
+        print(f"未指定 --model-dir，使用配置解析的模型: {model_dir}")
 
     if interactive_mode:
         interactive(cfg, Path(model_dir))

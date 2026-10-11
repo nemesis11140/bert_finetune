@@ -51,7 +51,7 @@ def cmd_serve(args) -> None:
     # 命令行参数优先级最高，写进环境变量后由 load_config 统一处理
     if args.host:
         os.environ["DS_HOST"] = args.host
-    if args.port:
+    if args.port is not None:
         os.environ["DS_PORT"] = str(args.port)
 
     from dianping_sentiment.config import load_config
@@ -89,7 +89,7 @@ def main() -> None:
     p.set_defaults(func=cmd_train)
 
     p = sub.add_parser("evaluate", help="评估模型")
-    p.add_argument("--model-dir", default=None, help="模型目录，默认取 models/ 下最新的")
+    p.add_argument("--model-dir", default=None, help="模型目录，默认按 DS_MODEL_DIR / config.yaml 解析")
     p.add_argument("--interactive", action="store_true", help="交互式逐条预测")
     p.set_defaults(func=cmd_evaluate)
 

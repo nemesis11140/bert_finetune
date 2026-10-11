@@ -12,19 +12,22 @@
 #   docker compose run --rm train               # 训练
 #   docker compose run --rm train generate      # 生成数据
 #   docker compose run --rm train evaluate      # 评估
-#   产物直接落在宿主机的 models/ 和 runs/，服务挂载着就能用，不用重建镜像。
+#   产物落在宿主机；切换已加载的模型需要重建 API 容器，不需要重建镜像。
 
 services:
   api:
     build: .
-    image: dianping-sentiment:latest
+    image: ${DS_IMAGE:-dianping-sentiment:latest}
     container_name: dianping-api
     ports:
-      - "${DS_PORT:-8000}:8000"
+      - "${DS_BIND_ADDRESS:-127.0.0.1}:${DS_PORT:-8000}:8000"
     environment:
       DS_HOST: 0.0.0.0
+      DS_PORT: "8000"
+      DS_DEBUG: "false"
+      DS_NUM_THREADS: ${DS_NUM_THREADS:-0}
       DS_LOG_LEVEL: ${DS_LOG_LEVEL:-INFO}
-      # 空值 = 自动取 models/ 下最新的一版（config.yaml 里的默认行为）
+      # 空值保留 config.yaml 的 model_dir；两处都未指定时选最新目录。
       DS_MODEL_DIR: ${DS_MODEL_DIR:-}
     volumes:
       # 权重不进镜像（400MB 且随训练变化），运行时挂进来；只读，容器里改不动
@@ -32,14 +35,26 @@ services:
       # 配置挂进来，调线程数/批量上限不用重建镜像
       - ./config.yaml:/app/config.yaml:ro
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # 健康检查沿用 Dockerfile 里的 HEALTHCHECK（打 /api/health，不触发推理）
 
   train:
     profiles: ["train"]
     build: .
-    image: dianping-sentiment:latest
-    # 不带参数就是训练；带参数则覆盖，如 `run --rm train evaluate`
-    command: ["python", "scripts/cli.py", "train"]
+    image: ${DS_IMAGE:-dianping-sentiment:latest}
+    # Linux 上可设为宿主用户 UID/GID，避免训练产物归 root 所有。
+    user: "${DS_TRAIN_UID:-0}:${DS_TRAIN_GID:-0}"
+    entrypoint: ["python", "scripts/cli.py"]
+    command: ["train"]
+    healthcheck:
+      disable: true
+    environment:
+      DS_MODEL_DIR: ${DS_MODEL_DIR:-}
+      DS_NUM_THREADS: ${DS_NUM_THREADS:-0}
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./bert-base-chinese:/app/bert-base-chinese:ro  # 预训练权重，只读

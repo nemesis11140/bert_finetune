@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
 from . import ID2LABEL, POSITIVE_ID, __version__
-from .config import Config, PROJECT_ROOT, load_config, resolve_model_dir
+from .config import Config, load_config, resolve_model_dir
 from .model import SentimentPredictor, InferenceResult
 
 APP_TITLE = "大众点评客户评价情感分析"
@@ -39,16 +38,19 @@ class ValidationError(ValueError):
     """请求参数不合法，路由层转成 400。"""
 
 
-def _extract_single(payload: object) -> str:
+def _extract_single(payload: object, max_text_length: int = 4096) -> str:
     if not isinstance(payload, dict):
         raise ValidationError("请求体必须是 JSON 对象")
     text = payload.get("text")
     if not isinstance(text, str) or not text.strip():
         raise ValidationError("字段 text 不能为空")
-    return text.strip()
+    text = text.strip()
+    if len(text) > max_text_length:
+        raise ValidationError(f"单条文本最多 {max_text_length} 字符")
+    return text
 
 
-def _extract_batch(payload: object, max_batch_size: int) -> list[str]:
+def _extract_batch(payload: object, max_batch_size: int, max_text_length: int = 4096) -> list[str]:
     """允许两种形式：``{"texts": [...]}`` 或 ``{"texts": "一行一条的字符串"}``
     （页面上的批量输入框就是多行 textarea，直接传字符串更省事）。"""
     if not isinstance(payload, dict):
@@ -62,12 +64,16 @@ def _extract_batch(payload: object, max_batch_size: int) -> list[str]:
     else:
         raise ValidationError("字段 texts 必须是数组或字符串")
 
-    texts = [str(x).strip() for x in candidates]
+    if any(not isinstance(x, str) for x in candidates):
+        raise ValidationError("texts 数组中的每一项必须是字符串")
+    texts = [x.strip() for x in candidates]
     texts = [t for t in texts if t]
     if not texts:
         raise ValidationError("texts 里没有有效内容")
     if len(texts) > max_batch_size:
         raise ValidationError(f"一次最多分析 {max_batch_size} 条，当前 {len(texts)} 条")
+    if any(len(text) > max_text_length for text in texts):
+        raise ValidationError(f"单条文本最多 {max_text_length} 字符")
     return texts
 
 
@@ -125,6 +131,12 @@ def create_app(config: Config | None = None, predictor: SentimentPredictor | Non
     _setup_logging(cfg.serving.log_level)
 
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = cfg.serving.max_content_length
+
+    @app.context_processor
+    def _template_limits():
+        return {"max_batch_size": cfg.serving.max_batch_size,
+                "max_text_length": cfg.serving.max_text_length}
 
     if predictor is None:
         model_dir = resolve_model_dir(cfg)
@@ -167,6 +179,10 @@ def create_app(config: Config | None = None, predictor: SentimentPredictor | Non
         return render_template("index.html", app_title=APP_TITLE,
                                labels=list(ID2LABEL.values()), samples=SAMPLES), 404
 
+    @app.errorhandler(413)
+    def _handle_too_large(_):
+        return jsonify({"error": f"请求体超过 {cfg.serving.max_content_length} 字节上限"}), 413
+
     @app.errorhandler(500)
     def _handle_500(exc):
         logger.exception("请求处理失败: %s", exc)
@@ -190,11 +206,13 @@ def create_app(config: Config | None = None, predictor: SentimentPredictor | Non
     @app.get("/api/meta")
     def meta():
         """当前生效的模型/运行环境，页面右上角展示的就是它。"""
-        return jsonify({"app": APP_TITLE, "version": __version__, **predictor.info()})
+        return jsonify({"app": APP_TITLE, "version": __version__, **predictor.info(),
+                        "labels": ID2LABEL, "max_batch_size": cfg.serving.max_batch_size,
+                        "max_text_length": cfg.serving.max_text_length})
 
     @app.post("/api/predict")
     def predict_single():
-        text = _extract_single(request.get_json(silent=True))
+        text = _extract_single(request.get_json(silent=True), cfg.serving.max_text_length)
         result = predictor.predict_one(text)
         logger.info("单条分析: %d 字 -> %s (%.1f ms)",
                     len(text), result.items[0].label, result.latency_ms)
@@ -202,7 +220,8 @@ def create_app(config: Config | None = None, predictor: SentimentPredictor | Non
 
     @app.post("/api/predict_batch")
     def predict_batch():
-        texts = _extract_batch(request.get_json(silent=True), cfg.serving.max_batch_size)
+        texts = _extract_batch(request.get_json(silent=True), cfg.serving.max_batch_size,
+                               cfg.serving.max_text_length)
         result = predictor.predict(texts)
         logger.info("批量分析: %d 条 -> 整批 %.1f ms / 单条 %.1f ms",
                     len(texts), result.latency_ms, result.per_item_ms)
@@ -224,4 +243,5 @@ def serve(cfg: Config) -> None:
     # waitress 是纯 Python WSGI，Windows 上也能跑（gunicorn 不支持 Windows）。
     from waitress import serve as waitress_serve
 
-    waitress_serve(app, host=host, port=port, threads=cfg.serving.threads)
+    waitress_serve(app, host=host, port=port, threads=cfg.serving.threads,
+                   max_request_body_size=cfg.serving.max_content_length)

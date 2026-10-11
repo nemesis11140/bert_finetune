@@ -9,8 +9,8 @@
 
 FROM python:3.12-slim
 
-# uv：装依赖用它，和本地开发用的是同一份 uv.lock
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# 固定已验证的构建工具版本，依赖使用同一份 uv.lock。
+COPY --from=ghcr.io/astral-sh/uv:0.13.0 /uv /usr/local/bin/uv
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -23,14 +23,21 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # 先只拷依赖清单并装依赖：改业务代码时这一层能命中缓存，不用重装 torch
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project
 
 COPY config.yaml ./
+COPY README.md ./
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY tests/ ./tests/
 RUN uv sync --frozen
+
+# 推理以非 root 身份运行；模型和配置以只读卷挂载。
+RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app
+ENV HF_HUB_OFFLINE=1 \
+    TOKENIZERS_PARALLELISM=false
+USER app
 
 EXPOSE 8000
 

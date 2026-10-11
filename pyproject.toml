@@ -3,7 +3,7 @@ name = "dianping-sentiment"
 version = "0.2.0"
 description = "大众点评客户评价情感分析（中文评价正负面判别：BERT 微调 + REST API + Web 页面）"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "torch>=2.5,<2.9",
     "torchvision>=0.23,<0.24",  # 与 torch 2.8.0+cpu 配套；transformers 的 zoedepth 模块无守卫导入它，缺了会报 ModuleNotFoundError

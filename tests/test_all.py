@@ -461,9 +461,247 @@ def test_empty_input_returns_empty_result():
     assert result.per_item_ms == 0.0
 
 
+def test_classifier_refuses_wrong_label_semantics_and_task():
+    from transformers import BertConfig
+    from dianping_sentiment import ID2LABEL, LABEL2ID
+    from dianping_sentiment.model import validate_classifier_config
+
+    valid = BertConfig(id2label=ID2LABEL, label2id=LABEL2ID,
+                       problem_type="single_label_classification")
+    validate_classifier_config(valid, 128)
+    invalid = [
+        BertConfig(num_labels=3),
+        BertConfig(id2label={0: "正面", 1: "负面"}, label2id={"正面": 0, "负面": 1}),
+        BertConfig(num_labels=2),  # LABEL_0/LABEL_1 语义未知
+        BertConfig(id2label=ID2LABEL, label2id=LABEL2ID, problem_type="multi_label_classification"),
+    ]
+    for cfg in invalid:
+        try:
+            validate_classifier_config(cfg, 128)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("不兼容的模型必须在启动时拒绝")
+    try:
+        validate_classifier_config(valid, 513)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("不能超出模型位置编码上限")
+
+
+def test_config_limits_and_empty_model_env():
+    from dataclasses import asdict
+    from unittest.mock import patch
+    import yaml
+
+    raw = asdict(config_mod.load_config(CONFIG_PATH))
+    raw["serving"]["model_dir"] = "models/pinned"
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DS_MODEL_DIR": ""}):
+        path = os.path.join(tmp, "config.yaml")
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(raw, f)
+        assert config_mod.load_config(path).serving.model_dir == "models/pinned"
+        for section, key, value in (
+            ("model", "num_labels", 3), ("model", "max_len", 513),
+            ("data", "val_ratio", 1.0), ("train", "batch_size", 0),
+            ("serving", "threads", 0), ("serving", "max_batch_size", -1),
+            ("serving", "debug", "false"), ("serving", "max_text_length", True),
+        ):
+            original = raw[section][key]
+            raw[section][key] = value
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(raw, f)
+            try:
+                config_mod.load_config(path)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"应拒绝配置 {section}.{key}={value!r}")
+            raw[section][key] = original
+    try:
+        config_mod._bool_env("flase")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("布尔环境变量拼写错误不能静默变成 False")
+
+
+def test_data_refuses_non_binary_labels_and_empty_data():
+    invalid = ([], {}, [{"text": "好吃", "label": 2}],
+               [{"text": "好吃", "label": True}], [{"text": "好吃", "label": "1"}],
+               [{"text": " ", "label": 1}], [{"text": None, "label": 0}])
+    for items in invalid:
+        try:
+            dg.validate_items(items)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"应拒绝数据: {items!r}")
+    assert dg.validate_items([{"text": "好吃"}], require_labels=False)
+    for num in (0, -1):
+        try:
+            dg.generate("不应创建.json", num, 42)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("不能生成空训练集")
+
+
+def test_http_limits_non_string_batch_and_configured_page():
+    from dataclasses import replace
+    from unittest.mock import Mock
+
+    fake = Mock()
+    fake.info.return_value = {"model_name": "fake", "device": "cpu", "num_threads": 1, "max_len": 128}
+    cfg = config_mod.load_config(CONFIG_PATH)
+    cfg = replace(cfg, serving=replace(cfg.serving, max_batch_size=2,
+                                      max_text_length=8, max_content_length=256))
+    app = service.create_app(cfg, fake)
+    client = app.test_client()
+    html = client.get("/").get_data(as_text=True)
+    assert 'data-max-batch="2"' in html and "最多 2 条" in html
+    assert client.get("/api/meta").get_json()["labels"] == {"0": "负面", "1": "正面"}
+    for body in ({"texts": [None]}, {"texts": [123]}, {"texts": [{}]},
+                 {"texts": ["x"] * 3}, {"texts": ["x" * 9]}):
+        assert client.post("/api/predict_batch", json=body).status_code == 400
+    assert client.post("/api/predict", json={"text": "x" * 9}).status_code == 400
+    large = client.post("/api/predict", json={"text": "x" * 300})
+    assert large.status_code == 413 and large.get_json()["error"]
+    fake.predict.assert_not_called()
+    fake.predict_one.assert_not_called()
+
+
+def test_evaluation_handles_single_class_and_rejects_empty_set():
+    import io
+    import json
+    from contextlib import redirect_stdout
+    from dataclasses import replace
+    from pathlib import Path
+    from unittest.mock import Mock, patch
+    from dianping_sentiment.evaluate import batch_evaluate
+
+    fake = Mock(device="cpu")
+    fake.predict.return_value = InferenceResult(
+        items=[Prediction("负面", 0, 0.9, {"负面": 0.9, "正面": 0.1})],
+        batch_size=1, latency_ms=1.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "test.json")
+        cfg = config_mod.load_config(CONFIG_PATH)
+        cfg = replace(cfg, data=replace(cfg.data, test_sentences_path=path))
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([{"text": "难吃", "label": 0}], f)
+        with patch("dianping_sentiment.evaluate.SentimentPredictor", return_value=fake), redirect_stdout(io.StringIO()):
+            batch_evaluate(cfg, Path(tmp))
+        with open(os.path.join(tmp, "eval_results.json"), encoding="utf-8") as f:
+            assert json.load(f)[0]["pred_label_id"] == 0
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([], f)
+        with patch("dianping_sentiment.evaluate.SentimentPredictor", return_value=fake), redirect_stdout(io.StringIO()):
+            try:
+                batch_evaluate(cfg, Path(tmp))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("空评估集应给出明确错误")
+
+
+def test_training_uses_configured_seed_in_trainer():
+    import io
+    import torch
+    from contextlib import redirect_stdout
+    from dataclasses import replace
+    from pathlib import Path
+    from unittest.mock import Mock, patch
+    from dianping_sentiment.train import _train
+
+    cfg = config_mod.load_config(CONFIG_PATH)
+    cfg = replace(cfg, train=replace(cfg.train, seed=73))
+    with tempfile.TemporaryDirectory() as tmp, \
+            patch("dianping_sentiment.train.load_data", return_value=(["文本"] * 20, [0, 1] * 10)), \
+            patch("dianping_sentiment.train.load_tokenizer", return_value=Mock()), \
+            patch("dianping_sentiment.train.load_for_training", return_value=Mock()), \
+            patch("dianping_sentiment.train.Trainer") as trainer, redirect_stdout(io.StringIO()):
+        _train(cfg, Path(tmp), torch.device("cpu"))
+        args = trainer.call_args.kwargs["args"]
+        assert args.seed == 73 and args.data_seed == 73
+        assert args.save_strategy == "no"
+
+
+def test_run_directory_collision_does_not_overwrite():
+    import datetime
+    from unittest.mock import patch
+    from dianping_sentiment.train import create_run_dir
+
+    frozen = datetime.datetime(2026, 1, 1)
+    with tempfile.TemporaryDirectory() as tmp, patch("dianping_sentiment.train.datetime.datetime") as clock:
+        clock.now.return_value = frozen
+        first, _ = create_run_dir(tmp)
+        assert first.is_dir()
+        try:
+            create_run_dir(tmp)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("同名 run 不能静默复用")
+
+
+def test_small_bert_training_and_saved_model_roundtrip():
+    """使用随机初始化的小 BERT 跑完整训练/保存/加载，无需下载权重。"""
+    import io
+    import torch
+    from contextlib import redirect_stdout
+    from dataclasses import replace
+    from pathlib import Path
+    from transformers import BertConfig, BertModel, BertTokenizer
+    from dianping_sentiment.model import SentimentPredictor
+    from dianping_sentiment.train import _train
+
+    previous_threads = torch.get_num_threads()
+    try:
+        torch.set_num_threads(1)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "base"
+            vocab = {token: index for index, token in enumerate(
+                ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "好", "吃", "差", "服", "务"])}
+            tokenizer = BertTokenizer(vocab=vocab)
+            tokenizer.save_pretrained(base)
+            BertModel(BertConfig(vocab_size=len(vocab), hidden_size=16,
+                                 num_hidden_layers=1, num_attention_heads=2,
+                                 intermediate_size=32, max_position_embeddings=32)).save_pretrained(base)
+            data_path = root / "data.json"
+            dg.generate(data_path, num_per_class=4, seed=42)
+            cfg = config_mod.load_config(CONFIG_PATH)
+            cfg = replace(cfg, data=replace(cfg.data, processed_path=str(data_path), val_ratio=0.25),
+                          model=replace(cfg.model, base_model=str(base), max_len=16),
+                          train=replace(cfg.train, batch_size=2, epochs=1))
+            with redirect_stdout(io.StringIO()):
+                trainer, saved_tokenizer, _, n_train, n_val = _train(cfg, root / "run", torch.device("cpu"))
+            assert (n_train, n_val) == (6, 2)
+            trained = root / "trained"
+            trainer.model.save_pretrained(trained)
+            saved_tokenizer.save_pretrained(trained)
+            predictor = SentimentPredictor(trained, max_len=16, num_threads=1)
+            result = predictor.predict(["好吃", "服务差"])
+            assert len(result.items) == 2
+            assert all(pred.label_id in (0, 1) and set(pred.probs) == {"负面", "正面"}
+                       and abs(sum(pred.probs.values()) - 1) < 1e-5 for pred in result.items)
+    finally:
+        torch.set_num_threads(previous_threads)
+
+
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"  ✅ {name}")
+    from unittest.mock import patch
+
+    # 测试默认 YAML 时隔离容器/宿主机 DS_* 配置，避免 Dockerfile 的
+    # DS_HOST=0.0.0.0 等部署参数干扰默认值断言；退出后恢复原环境。
+    with patch.dict(os.environ):
+        for key in list(os.environ):
+            if key.startswith("DS_"):
+                os.environ.pop(key)
+        for name, fn in sorted(globals().items()):
+            if name.startswith("test_") and callable(fn):
+                fn()
+                print(f"  ✅ {name}")
     print("全部通过")

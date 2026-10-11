@@ -11,7 +11,7 @@ data:
 
 model:
   base_model: bert-base-chinese   # 预训练权重（本地目录，需自行下载）
-  num_labels: 2                   # 情感类别数
+  num_labels: 2                   # 固定二分类：0=负面，1=正面；不支持中性/多标签
   max_len: 128                    # 截断上限；推理按 batch 内实际长度动态补齐，不会补到这里
 
 train:
@@ -37,4 +37,6 @@ serving:
   num_threads: 0       # torch 线程数，0 = 自动（取 min(8, 逻辑核数)）
   warmup: true         # 启动时先跑一次空推理，避免第一个请求慢好几倍
   max_batch_size: 64   # 单次批量分析的最大条数
+  max_text_length: 4096       # 单条文本的字符上限；token 截断仍由 model.max_len 控制
+  max_content_length: 1048576 # 请求体字节上限（1 MiB）
   log_level: INFO
